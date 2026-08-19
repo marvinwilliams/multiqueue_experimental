@@ -72,21 +72,22 @@ class MultiQueue {
         using shared_data_type = typename policy_type::mode_type::SharedData;
 
        private:
+        // Must be declared first, as it is used to allocate pq_guards_
+        [[no_unique_address]] internal_allocator_type alloc_;
         size_type num_pqs_{};
         guard_type *pq_guards_{nullptr};
         [[no_unique_address]] config_type config_;
         [[no_unique_address]] shared_data_type data_;
         [[no_unique_address]] key_compare comp_;
-        [[no_unique_address]] internal_allocator_type alloc_;
 
         explicit Context(size_type num_pqs, config_type const &config, priority_queue_type const &pq,
                          key_compare const &comp, allocator_type const &alloc)
-            : num_pqs_{num_pqs},
+            : alloc_{alloc},
+              num_pqs_{num_pqs},
               pq_guards_{std::allocator_traits<internal_allocator_type>::allocate(alloc_, num_pqs_)},
               config_{config},
               data_{num_pqs_},
-              comp_{comp},
-              alloc_{alloc} {
+              comp_{comp} {
             assert(num_pqs_ > 0);
 
             for (auto *it = pq_guards_; it != pq_guards_ + num_pqs_; ++it) {
@@ -107,12 +108,12 @@ class MultiQueue {
         template <typename ForwardIt>
         explicit Context(ForwardIt first, ForwardIt last, config_type const &config, key_compare const &comp,
                          allocator_type const &alloc)
-            : num_pqs_{std::distance(first, last)},
+            : alloc_(alloc),
+              num_pqs_{static_cast<size_type>(std::distance(first, last))},
               pq_guards_{std::allocator_traits<internal_allocator_type>::allocate(alloc_, num_pqs_)},
               config_{config},
               data_{num_pqs_},
-              comp_{comp},
-              alloc_(alloc) {
+              comp_{comp} {
             for (auto *it = pq_guards_; it != pq_guards_ + num_pqs_; ++it, ++first) {
                 std::allocator_traits<internal_allocator_type>::construct(alloc_, it, *first);
             }
@@ -208,7 +209,7 @@ class MultiQueue {
     }
 
     [[nodiscard]] allocator_type get_allocator() const {
-        return allocator_type_(context_.alloc_);
+        return allocator_type(context_.alloc_);
     }
 
     [[nodiscard]] config_type const &config() const {

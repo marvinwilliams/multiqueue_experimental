@@ -7,14 +7,21 @@
 
 namespace multiqueue::mode {
 
-// StickRandom that additionally spreads quality over its two pqs: if popping
-// uncovers an element that is better than the other candidate's top, that
-// element is moved to the other, worse pq, so that a later draw hitting either
-// of them finds something good.
+// StickRandom that reacts to a contended pq by replacing only that pq instead of
+// drawing a whole new selection.
+//
+// Contention says that this one pq overlaps with another handle's selection; it
+// says nothing about the others, and throwing them away costs the cache lines
+// they had warmed up.  Replacing a single candidate is also the smaller
+// perturbation for quality: the selection decorrelates gradually rather than
+// jumping, so the handle always holds a mix of recently and less recently drawn
+// pqs instead of a set that is uniformly stale just before it expires.
+//
+// A drained pq is different: because the sentinel compares worse than any real
+// key, the best candidate being empty means all of them are, so that still ends
+// the period and redraws everything.
 template <int num_pop_candidates = 2, StickPeriod period = StickPeriod::Fixed>
-class StickRandomMTW : public StickyModeBase<num_pop_candidates, period> {
-    static_assert(num_pop_candidates == 2);
-
+class StickReplace : public StickyModeBase<num_pop_candidates, period> {
     using base_type = StickyModeBase<num_pop_candidates, period>;
 
    public:
@@ -22,7 +29,7 @@ class StickRandomMTW : public StickyModeBase<num_pop_candidates, period> {
     using SharedData = BaseSharedData<num_pop_candidates>;
 
    protected:
-    explicit StickRandomMTW(Config const& config, SharedData& shared_data) noexcept
+    explicit StickReplace(Config const& config, SharedData& shared_data) noexcept
         : base_type{config.seed, config.stickiness, shared_data} {
     }
 
@@ -34,22 +41,15 @@ class StickRandomMTW : public StickyModeBase<num_pop_candidates, period> {
             auto best = best_position(ctx, keys);
             auto& guard = ctx.pq_guards()[this->pop_index_[best]];
             if (!guard.try_lock()) {
-                this->reselect(ctx);
+                // Only the pq we collided on moves, the period goes on
+                this->replace(ctx, best);
                 continue;
             }
             auto v = pop_locked(guard);
+            guard.unlock();
             if (!v) {
-                guard.unlock();
                 this->period_.expire();
                 return std::nullopt;
-            }
-            auto displaced = take_better_than(ctx, guard, keys[1 - best]);
-            guard.unlock();
-            if (displaced) {
-                auto& other = ctx.pq_guards()[this->pop_index_[1 - best]];
-                if (!try_push(other, *displaced)) {
-                    push(ctx, *displaced);
-                }
             }
             this->consume();
             return v;
@@ -66,7 +66,7 @@ class StickRandomMTW : public StickyModeBase<num_pop_candidates, period> {
                 this->consume();
                 return;
             }
-            this->reselect(ctx);
+            this->replace(ctx, push_index);
         }
     }
 };

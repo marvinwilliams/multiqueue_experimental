@@ -19,9 +19,12 @@ namespace multiqueue {
 
 template <typename Key, typename Value, typename KeyOfValue, typename PriorityQueue, typename Sentinel>
 class alignas(build_config::l1_cache_line_size) PQGuard {
+   public:
     using key_type = Key;
     using value_type = Value;
     using priority_queue_type = PriorityQueue;
+
+   private:
     static_assert(std::is_same_v<value_type, typename priority_queue_type::value_type>,
                   "PriorityQueue::value_type must be the same as Value");
     static_assert(std::atomic<key_type>::is_always_lock_free, "std::atomic<key_type> must be lock-free");
@@ -73,6 +76,21 @@ class alignas(build_config::l1_cache_line_size) PQGuard {
         auto key = KeyOfValue::get(pq_.top());
         if (key != top_key()) {
             top_key_.store(key, std::memory_order_relaxed);
+        }
+    }
+
+    // Raises the cached top key to `key` if `better(current, key)`, so that an
+    // element which belongs to this pq but has not been put into it yet can
+    // still be found by candidate selection.  Only ever improves the key, so it
+    // cannot undo an update made by whoever holds the lock, and needs no lock of
+    // its own.
+    template <typename Better>
+    void publish_top_key(key_type key, Better better) noexcept {
+        auto current = top_key_.load(std::memory_order_relaxed);
+        while (better(current, key)) {
+            if (top_key_.compare_exchange_weak(current, key, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                return;
+            }
         }
     }
 
