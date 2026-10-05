@@ -7,15 +7,15 @@
 namespace multiqueue::mode {
 
 template <int num_pop_candidates = 2, StickPeriod period = StickPeriod::Fixed>
-class StickMark : public StickyModeBase<num_pop_candidates, period> {
+class StickReplace : public StickyModeBase<num_pop_candidates, period> {
     using base_type = StickyModeBase<num_pop_candidates, period>;
 
    public:
-    using config_type = typename base_type::Config;
-    using shared_data_type = typename base_type::SharedData;
+    using config_type = StickyConfig;
+    using shared_data_type = BaseSharedData<num_pop_candidates>;
 
    protected:
-    explicit StickMark(config_type const& config, shared_data_type& shared_data) noexcept
+    explicit StickReplace(config_type const& config, shared_data_type& shared_data) noexcept
         : base_type{config.seed, config.stickiness, shared_data} {
     }
 
@@ -26,12 +26,12 @@ class StickMark : public StickyModeBase<num_pop_candidates, period> {
             auto keys = top_keys(ctx, this->pop_index_);
             auto best_pos = best_position(ctx, keys);
             auto& guard = ctx.pq_guards()[this->pop_index_[best_pos]];
-            if (!guard.try_lock(this->period_.is_fresh(), this->id())) {
-                this->reselect(ctx);
+            if (!guard.try_lock()) {
+                this->replace(ctx, best_pos);
                 continue;
             }
             auto v = guard.pop_locked();
-            guard.unlock(this->id());
+            guard.unlock();
             if (!v) {
                 this->period_.expire();
                 return std::nullopt;
@@ -47,13 +47,11 @@ class StickMark : public StickyModeBase<num_pop_candidates, period> {
         auto push_index = this->random_candidate();
         while (true) {
             auto& guard = ctx.pq_guards()[this->pop_index_[push_index]];
-            if (guard.try_lock(this->period_.is_fresh(), this->id())) {
-                guard.push_locked(v);
-                guard.unlock(this->id());
+            if (guard.try_push(v)) {
                 this->consume();
                 return;
             }
-            this->reselect(ctx);
+            this->replace(ctx, push_index);
         }
     }
 };

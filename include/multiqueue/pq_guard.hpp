@@ -13,15 +13,19 @@
 #include "multiqueue/build_config.hpp"
 
 #include <atomic>
+#include <optional>
 #include <type_traits>
 
 namespace multiqueue {
 
 template <typename Key, typename Value, typename KeyOfValue, typename PriorityQueue, typename Sentinel>
 class alignas(build_config::l1_cache_line_size) PQGuard {
+   public:
     using key_type = Key;
     using value_type = Value;
     using priority_queue_type = PriorityQueue;
+
+   private:
     static_assert(std::is_same_v<value_type, typename priority_queue_type::value_type>,
                   "PriorityQueue::value_type must be the same as Value");
     static_assert(std::atomic<key_type>::is_always_lock_free, "std::atomic<key_type> must be lock-free");
@@ -45,7 +49,8 @@ class alignas(build_config::l1_cache_line_size) PQGuard {
 
     bool try_lock() noexcept {
         // Test first to not invalidate the cache line
-        return (lock_.load(std::memory_order_relaxed) & 1U) == 0U && (lock_.exchange(1U, std::memory_order_acquire) & 1) == 0U;
+        return (lock_.load(std::memory_order_relaxed) & 1U) == 0U &&
+            (lock_.exchange(1U, std::memory_order_acquire) & 1) == 0U;
     }
 
     bool try_lock(bool force, uint32_t mark) noexcept {
@@ -74,6 +79,30 @@ class alignas(build_config::l1_cache_line_size) PQGuard {
         if (key != top_key()) {
             top_key_.store(key, std::memory_order_relaxed);
         }
+    }
+
+    [[nodiscard]] std::optional<value_type> pop_locked() {
+        if (get_pq().empty()) {
+            return std::nullopt;
+        }
+        auto v = get_pq().top();
+        get_pq().pop();
+        popped();
+        return v;
+    }
+
+    void push_locked(value_type const& v) {
+        get_pq().push(v);
+        pushed();
+    }
+
+    [[nodiscard]] bool try_push(value_type const& v) {
+        if (!try_lock()) {
+            return false;
+        }
+        push_locked(v);
+        unlock();
+        return true;
     }
 
     void unlock() {

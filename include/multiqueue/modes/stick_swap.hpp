@@ -1,59 +1,55 @@
 #pragma once
 
 #include "multiqueue/build_config.hpp"
+#include "multiqueue/modes/common.hpp"
 
-#include "pcg_random.hpp"
-
-#include <algorithm>
-#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <limits>
 #include <optional>
-#include <random>
+#include <vector>
 
 namespace multiqueue::mode {
 
-template <int num_pop_candidates = 2>
-class StickSwap {
-    static_assert(num_pop_candidates > 0);
+template <int num_pop_candidates = 2, StickPeriod period = StickPeriod::Fixed>
+class StickSwap : public ModeBase<num_pop_candidates> {
+    using base_type = ModeBase<num_pop_candidates>;
 
-   public:
     struct alignas(build_config::l1_cache_line_size) AlignedIndex {
         std::atomic<std::size_t> value;
     };
 
     using permutation_type = std::vector<AlignedIndex>;
 
-    struct Config {
-        int seed{1};
-        int stickiness{16};
-    };
-
-    struct SharedData {
+    struct SharedData : BaseSharedData<num_pop_candidates> {
         permutation_type permutation;
-        std::atomic_int id_count{0};
 
-        explicit SharedData(std::size_t num_pqs) : permutation(num_pqs) {
+        explicit SharedData(std::size_t num_pqs) : BaseSharedData<num_pop_candidates>{}, permutation(num_pqs) {
             for (std::size_t i = 0; i < num_pqs; ++i) {
                 permutation[i].value = i;
             }
         }
     };
 
+    using period_type = StickPeriodState<period>;
+
+   public:
+    using config_type = typename base_type::Config;
+    using shared_data_type = SharedData;
+
    private:
-    pcg32 rng_{};
-    int stick_count_{};
+    period_type period_{};
     std::size_t offset_{};
 
     void swap_assignment(permutation_type& perm, std::size_t index) noexcept {
         static constexpr std::size_t swapping = std::numeric_limits<std::size_t>::max();
-        assert(index < num_pop_candidates);
+        assert(index < static_cast<std::size_t>(num_pop_candidates));
         std::size_t old_target = perm[offset_ + index].value.exchange(swapping, std::memory_order_relaxed);
         std::size_t perm_index{};
         std::size_t new_target{};
         do {
-            perm_index = std::uniform_int_distribution<std::size_t>{0, perm.size() - 1}(rng_);
+            perm_index = this->random_index(perm.size());
             new_target = perm[perm_index].value.load(std::memory_order_relaxed);
         } while (new_target == swapping ||
                  !perm[perm_index].value.compare_exchange_weak(new_target, old_target, std::memory_order_relaxed));
@@ -61,75 +57,68 @@ class StickSwap {
     }
 
     template <typename Context>
-    std::size_t best_pop_index(Context const& ctx) noexcept {
-        std::size_t best = ctx.shared_data().permutation[offset_].value.load(std::memory_order_relaxed);
-        auto best_key = ctx.pq_guards()[best].top_key();
-        for (std::size_t i = 1; i < static_cast<std::size_t>(num_pop_candidates); ++i) {
-            std::size_t target = ctx.shared_data().permutation[offset_ + i].value.load(std::memory_order_relaxed);
-            auto key = ctx.pq_guards()[target].top_key();
-            if (ctx.compare(best_key, key)) {
-                best = target;
-                best_key = key;
-            }
+    void reassign_all(Context& ctx) noexcept {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(num_pop_candidates); ++i) {
+            swap_assignment(ctx.shared_data().permutation, i);
         }
-        return best;
+        period_.renew();
+    }
+
+    [[nodiscard]] std::size_t pq_index(permutation_type const& perm, std::size_t index) const noexcept {
+        return perm[offset_ + index].value.load(std::memory_order_relaxed);
+    }
+
+    template <typename Context>
+    [[nodiscard]] typename base_type::index_array pq_indices(Context const& ctx) const noexcept {
+        typename base_type::index_array indices{};
+        for (std::size_t i = 0; i < indices.size(); ++i) {
+            indices[i] = pq_index(ctx.shared_data().permutation, i);
+        }
+        return indices;
     }
 
    protected:
-    explicit StickSwap(Config const& config, SharedData& shared_data) noexcept {
-        auto id = shared_data.id_count.fetch_add(1, std::memory_order_relaxed);
-        auto seq = std::seed_seq{config.seed, id};
-        rng_.seed(seq);
-        offset_ = static_cast<std::size_t>(id * num_pop_candidates);
+    explicit StickSwap(config_type const& config, shared_data_type& shared_data) noexcept
+        : base_type{config.seed, shared_data},
+          period_{config.stickiness},
+          offset_{this->id() * static_cast<std::size_t>(num_pop_candidates)} {
     }
 
     template <typename Context>
     std::optional<typename Context::value_type> try_pop(Context& ctx) {
-        if (stick_count_ == 0) {
-            for (std::size_t i = 0; i < static_cast<std::size_t>(num_pop_candidates); ++i) {
-                swap_assignment(ctx.shared_data().permutation, i);
-            }
-            stick_count_ = ctx.config().stickiness;
+        if (period_.expired()) {
+            reassign_all(ctx);
         }
         while (true) {
-            auto& guard = ctx.pq_guards()[best_pop_index(ctx)];
-            if (guard.try_lock()) {
-                if (guard.get_pq().empty()) {
-                    guard.unlock();
-                    stick_count_ = 0;
-                    return std::nullopt;
-                }
-                auto v = guard.get_pq().top();
-                guard.get_pq().pop();
-                guard.popped();
-                guard.unlock();
-                --stick_count_;
-                return v;
+            auto indices = pq_indices(ctx);
+            auto keys = top_keys(ctx, indices);
+            auto best_pos = best_position(ctx, keys);
+            auto& guard = ctx.pq_guards()[indices[best_pos]];
+            if (!guard.try_lock()) {
+                reassign_all(ctx);
+                continue;
             }
-            for (std::size_t i = 0; i < static_cast<std::size_t>(num_pop_candidates); ++i) {
-                swap_assignment(ctx.shared_data().permutation, i);
+            auto v = guard.pop_locked();
+            guard.unlock();
+            if (!v) {
+                period_.expire();
+                return std::nullopt;
             }
-            stick_count_ = ctx.config().stickiness;
+            period_.consume();
+            return v;
         }
     }
 
     template <typename Context>
     void push(Context& ctx, typename Context::value_type const& v) {
-        if (stick_count_ == 0) {
-            for (std::size_t i = 0; i < static_cast<std::size_t>(num_pop_candidates); ++i) {
-                swap_assignment(ctx.shared_data().permutation, i);
-            }
-            stick_count_ = ctx.config().stickiness;
+        if (period_.expired()) {
+            reassign_all(ctx);
         }
-        std::size_t push_index = rng_() % num_pop_candidates;
+        auto push_index = this->random_candidate();
         while (true) {
-            auto target = ctx.shared_data().permutation[offset_ + push_index].value.load(std::memory_order_relaxed);
-            auto& guard = ctx.pq_guards()[target];
-            if (guard.try_lock()) {
-                guard.get_pq().push(v);
-                guard.pushed();
-                guard.unlock();
-                --stick_count_;
+            auto& guard = ctx.pq_guards()[pq_index(ctx.shared_data().permutation, push_index)];
+            if (guard.try_push(v)) {
+                period_.consume();
                 return;
             }
             swap_assignment(ctx.shared_data().permutation, push_index);
