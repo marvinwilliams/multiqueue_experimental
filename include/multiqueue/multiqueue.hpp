@@ -17,16 +17,28 @@
 #include "multiqueue/sentinel.hpp"
 #include "multiqueue/utils.hpp"
 
-#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdlib>
+#include <iterator>
 #include <memory>
-#include <mutex>
-#include <stdexcept>
 #include <type_traits>
 
 namespace multiqueue {
+
+namespace detail {
+
+template <typename It, typename = void>
+struct is_forward_iterator : std::false_type {};
+
+template <typename It>
+struct is_forward_iterator<It, std::void_t<typename std::iterator_traits<It>::iterator_category>>
+    : std::is_convertible<typename std::iterator_traits<It>::iterator_category, std::forward_iterator_tag> {};
+
+template <typename It>
+inline constexpr bool is_forward_iterator_v = is_forward_iterator<It>::value;
+
+}  // namespace detail
 
 template <typename Value, typename Compare>
 using DefaultPriorityQueue = BufferedPQ<Heap<Value, Compare>>;
@@ -55,7 +67,7 @@ class MultiQueue {
     using size_type = std::size_t;
     using allocator_type = Allocator;
     using sentinel_type = Sentinel;
-    using config_type = typename policy_type::mode_type::Config;
+    using config_type = typename policy_type::mode_type::config_type;
 
    private:
     using guard_type = PQGuard<key_type, value_type, KeyOfValue, priority_queue_type, sentinel_type>;
@@ -69,7 +81,7 @@ class MultiQueue {
         using value_type = MultiQueue::value_type;
         using policy_type = MultiQueue::policy_type;
         using guard_type = MultiQueue::guard_type;
-        using shared_data_type = typename policy_type::mode_type::SharedData;
+        using shared_data_type = typename policy_type::mode_type::shared_data_type;
 
        private:
         [[no_unique_address]] internal_allocator_type alloc_;
@@ -184,12 +196,12 @@ class MultiQueue {
     }
 
     explicit MultiQueue(size_type num_pqs, typename priority_queue_type::size_type initial_capacity,
-                        config_type const &config = {}, priority_queue_type const &pq = priority_queue_type(),
+                        config_type const &config, priority_queue_type const &pq = priority_queue_type(),
                         key_compare const &comp = {}, allocator_type const &alloc = {})
         : context_{num_pqs, initial_capacity, config, pq, comp, internal_allocator_type(alloc)} {
     }
 
-    template <typename ForwardIt>
+    template <typename ForwardIt, typename = std::enable_if_t<detail::is_forward_iterator_v<ForwardIt>>>
     explicit MultiQueue(ForwardIt first, ForwardIt last, config_type const &config = {}, key_compare const &comp = {},
                         allocator_type const &alloc = {})
         : context_{first, last, config, comp, internal_allocator_type(alloc)} {

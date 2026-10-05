@@ -2,7 +2,6 @@
 
 #include "multiqueue/modes/common.hpp"
 
-#include <cstddef>
 #include <optional>
 
 namespace multiqueue::mode {
@@ -12,18 +11,18 @@ class Random : public ModeBase<num_pop_candidates> {
     using base_type = ModeBase<num_pop_candidates>;
 
    public:
-    using config_type = typename base_type::Config;
-    using shared_data_type = typename base_type::SharedData;
+    using config_type = typename base_type::config_type;
+    using shared_data_type = typename base_type::shared_data_type;
 
    protected:
     explicit Random(config_type const& config, shared_data_type& shared_data) noexcept
-        : base_type{config.seed, shared_data} {
+        : base_type{config, shared_data} {
     }
 
     template <typename Context>
     std::optional<typename Context::value_type> try_pop(Context& ctx) {
         while (true) {
-            auto indices = this_sample_indices(ctx.num_pqs());
+            auto indices = this->sample_indices(ctx.num_pqs());
             auto keys = top_keys(ctx, indices);
             auto best_pos = best_position(ctx, keys);
             auto& guard = ctx.pq_guards()[indices[best_pos]];

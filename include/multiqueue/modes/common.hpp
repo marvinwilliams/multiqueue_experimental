@@ -31,6 +31,9 @@ template <int NumPopCandidates>
 struct BaseSharedData {
     std::atomic_uint id_count{0};
 
+    explicit BaseSharedData(std::size_t /*num_pqs*/) noexcept {
+    }
+
     [[nodiscard]] unsigned next_id() noexcept {
         return id_count.fetch_add(1, std::memory_order_relaxed);
     }
@@ -90,12 +93,16 @@ class ModeBase {
     std::uint32_t id_{};
     pcg32 rng_{};
 
+   public:
+    using config_type = BaseConfig;
+    using shared_data_type = BaseSharedData<NumPopCandidates>;
+
    protected:
     using index_array = std::array<std::size_t, static_cast<std::size_t>(NumPopCandidates)>;
 
-    template <typename SharedData>
-    explicit ModeBase(int seed, SharedData& shared_data) noexcept : id_{shared_data.next_id()} {
-        auto seq = std::seed_seq{seed, static_cast<int>(id_)};
+    explicit ModeBase(config_type const& config, shared_data_type& shared_data) noexcept
+        : id_{shared_data.next_id()} {
+        auto seq = std::seed_seq{config.seed, static_cast<int>(id_)};
         rng_.seed(seq);
     }
 
@@ -129,112 +136,65 @@ class ModeBase {
     void push_random(Context& ctx, typename Context::value_type const& v) {
         while (true) {
             auto& guard = ctx.pq_guards()[random_index(ctx.num_pqs())];
-            if (try_push(guard, v)) {
+            if (guard.try_push(v)) {
                 return;
             }
         }
     }
 };
 
-enum class StickPeriod { Fixed, Geometric };
-
-template <StickPeriod Period = StickPeriod::Fixed>
-class StickPeriodState {
-    int count_{0};
-    int stickiness_{};
-
-   public:
-    StickPeriodState() = default;
-
-    explicit StickPeriodState(int stickiness) noexcept : stickiness_{stickiness} {
-        assert(stickiness > 0);
-    }
-
-    [[nodiscard]] int stickiness() const noexcept {
-        return stickiness_;
-    }
-
-    [[nodiscard]] bool expired() const noexcept {
-        return count_ <= 0;
-    }
-
-    void renew() noexcept {
-        count_ = stickiness_;
-    }
-
-    void expire() noexcept {
-        count_ = 0;
-    }
-
-    void consume() noexcept {
-        --count_;
-    }
-};
-
-template <>
-class StickPeriodState<StickPeriod::Geometric> {
-    int count_{0};
-    int stickiness_{};
-    double p_{};
-
-   public:
-    StickPeriodState() = default;
-
-    explicit StickPeriodState(int stickiness) noexcept : stickiness_{stickiness} {
-        assert(stickiness > 0);
-        p_ = 1.0 / static_cast<double>(stickiness_);
-    }
-
-    [[nodiscard]] int stickiness() const noexcept {
-        return stickiness_;
-    }
-
-    [[nodiscard]] bool expired() const noexcept {
-        return count_ <= 0;
-    }
-
-    template <typename Rng>
-    void renew(Rng& rng) noexcept {
-        count_ = std::geometric_distribution<int>{1.0 / stickiness_}(rng) + 1;
-    }
-
-    void expire() noexcept {
-        count_ = 0;
-    }
-
-    void consume() noexcept {
-        --count_;
-    }
-};
-
-template <int NumPopCandidates, StickPeriod Period = StickPeriod::Fixed>
+template <int NumPopCandidates>
 class StickyModeBase : public ModeBase<NumPopCandidates> {
     using base_type = ModeBase<NumPopCandidates>;
 
+    int stickiness_{};
+    int remaining_{0};
+
+   public:
+    using config_type = StickyConfig;
+    using shared_data_type = typename base_type::shared_data_type;
+
    protected:
-    using period_type = StickPeriodState<Period>;
-
     typename base_type::index_array pop_index_{};
-    period_type period_{};
 
-    template <typename SharedData>
-    explicit StickyModeBase(int seed, int stickiness, SharedData& shared_data) noexcept
-        : base_type{seed, shared_data}, period_{stickiness} {
+    explicit StickyModeBase(config_type const& config, shared_data_type& shared_data) noexcept
+        : base_type{config, shared_data}, stickiness_{config.stickiness} {
+        assert(stickiness_ > 0);
+    }
+
+    [[nodiscard]] int stickiness() const noexcept {
+        return stickiness_;
+    }
+
+    [[nodiscard]] bool expired() const noexcept {
+        return remaining_ <= 0;
+    }
+
+    [[nodiscard]] bool is_fresh() const noexcept {
+        return remaining_ == stickiness_;
+    }
+
+    void renew() noexcept {
+        remaining_ = stickiness_;
+    }
+
+    void expire() noexcept {
+        remaining_ = 0;
+    }
+
+    void consume() noexcept {
+        --remaining_;
     }
 
     template <typename Context>
     void reselect(Context const& ctx) noexcept {
         pop_index_ = this->sample_indices(ctx.num_pqs());
-        if constexpr (Period == StickPeriod::Fixed) {
-            period_.renew();
-        } else {
-            period_.renew(this->rng());
-        }
+        renew();
     }
 
     template <typename Context>
     void reselect_if_expired(Context const& ctx) noexcept {
-        if (period_.expired()) {
+        if (expired()) {
             reselect(ctx);
         }
     }
@@ -254,13 +214,9 @@ class StickyModeBase : public ModeBase<NumPopCandidates> {
     void replace_from(Context const& ctx, std::size_t position) noexcept {
         for (auto it = pop_index_.begin() + position; it != pop_index_.end(); ++it) {
             do {
-                *it = random_index(ctx.num_pqs());
+                *it = this->random_index(ctx.num_pqs());
             } while (std::find(pop_index_.begin(), it, *it) != it);
         }
-    }
-
-    void consume() noexcept {
-        period_.consume();
     }
 };
 

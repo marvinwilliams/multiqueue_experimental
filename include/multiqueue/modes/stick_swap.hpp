@@ -12,9 +12,9 @@
 
 namespace multiqueue::mode {
 
-template <int num_pop_candidates = 2, StickPeriod period = StickPeriod::Fixed>
-class StickSwap : public ModeBase<num_pop_candidates> {
-    using base_type = ModeBase<num_pop_candidates>;
+template <int num_pop_candidates = 2>
+class StickSwap : public StickyModeBase<num_pop_candidates> {
+    using base_type = StickyModeBase<num_pop_candidates>;
 
     struct alignas(build_config::l1_cache_line_size) AlignedIndex {
         std::atomic<std::size_t> value;
@@ -22,24 +22,21 @@ class StickSwap : public ModeBase<num_pop_candidates> {
 
     using permutation_type = std::vector<AlignedIndex>;
 
-    struct SharedData : BaseSharedData<num_pop_candidates> {
+    struct SharedData : base_type::shared_data_type {
         permutation_type permutation;
 
-        explicit SharedData(std::size_t num_pqs) : BaseSharedData<num_pop_candidates>{}, permutation(num_pqs) {
+        explicit SharedData(std::size_t num_pqs) : base_type::shared_data_type{num_pqs}, permutation(num_pqs) {
             for (std::size_t i = 0; i < num_pqs; ++i) {
                 permutation[i].value = i;
             }
         }
     };
 
-    using period_type = StickPeriodState<period>;
-
    public:
-    using config_type = typename base_type::Config;
+    using config_type = typename base_type::config_type;
     using shared_data_type = SharedData;
 
    private:
-    period_type period_{};
     std::size_t offset_{};
 
     void swap_assignment(permutation_type& perm, std::size_t index) noexcept {
@@ -61,7 +58,7 @@ class StickSwap : public ModeBase<num_pop_candidates> {
         for (std::size_t i = 0; i < static_cast<std::size_t>(num_pop_candidates); ++i) {
             swap_assignment(ctx.shared_data().permutation, i);
         }
-        period_.renew();
+        this->renew();
     }
 
     [[nodiscard]] std::size_t pq_index(permutation_type const& perm, std::size_t index) const noexcept {
@@ -79,14 +76,13 @@ class StickSwap : public ModeBase<num_pop_candidates> {
 
    protected:
     explicit StickSwap(config_type const& config, shared_data_type& shared_data) noexcept
-        : base_type{config.seed, shared_data},
-          period_{config.stickiness},
+        : base_type{config, shared_data},
           offset_{this->id() * static_cast<std::size_t>(num_pop_candidates)} {
     }
 
     template <typename Context>
     std::optional<typename Context::value_type> try_pop(Context& ctx) {
-        if (period_.expired()) {
+        if (this->expired()) {
             reassign_all(ctx);
         }
         while (true) {
@@ -101,24 +97,24 @@ class StickSwap : public ModeBase<num_pop_candidates> {
             auto v = guard.pop_locked();
             guard.unlock();
             if (!v) {
-                period_.expire();
+                this->expire();
                 return std::nullopt;
             }
-            period_.consume();
+            this->consume();
             return v;
         }
     }
 
     template <typename Context>
     void push(Context& ctx, typename Context::value_type const& v) {
-        if (period_.expired()) {
+        if (this->expired()) {
             reassign_all(ctx);
         }
         auto push_index = this->random_candidate();
         while (true) {
             auto& guard = ctx.pq_guards()[pq_index(ctx.shared_data().permutation, push_index)];
             if (guard.try_push(v)) {
-                period_.consume();
+                this->consume();
                 return;
             }
             swap_assignment(ctx.shared_data().permutation, push_index);

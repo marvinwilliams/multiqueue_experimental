@@ -6,17 +6,17 @@
 
 namespace multiqueue::mode {
 
-template <int num_pop_candidates = 2, StickPeriod period = StickPeriod::Fixed>
-class StickReplace : public StickyModeBase<num_pop_candidates, period> {
-    using base_type = StickyModeBase<num_pop_candidates, period>;
+template <int num_pop_candidates = 2>
+class StickReplace : public StickyModeBase<num_pop_candidates> {
+    using base_type = StickyModeBase<num_pop_candidates>;
 
    public:
-    using config_type = StickyConfig;
-    using shared_data_type = BaseSharedData<num_pop_candidates>;
+    using config_type = typename base_type::config_type;
+    using shared_data_type = typename base_type::shared_data_type;
 
    protected:
     explicit StickReplace(config_type const& config, shared_data_type& shared_data) noexcept
-        : base_type{config.seed, config.stickiness, shared_data} {
+        : base_type{config, shared_data} {
     }
 
     template <typename Context>
@@ -33,7 +33,7 @@ class StickReplace : public StickyModeBase<num_pop_candidates, period> {
             auto v = guard.pop_locked();
             guard.unlock();
             if (!v) {
-                this->period_.expire();
+                this->expire();
                 return std::nullopt;
             }
             this->consume();
