@@ -8,7 +8,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <optional>
 #include <random>
 
@@ -202,7 +201,8 @@ class StickyModeBase : public ModeBase<NumPopCandidates> {
     template <typename Context>
     void replace(Context const& ctx, std::size_t position) noexcept {
         assert(position < pop_index_.size());
-        assert(ctx.num_pqs() > pop_index_.size());
+        assert(ctx.num_pqs() >= pop_index_.size());
+        pop_index_[position] = static_cast<std::size_t>(-1);
         std::size_t index{};
         do {
             index = this->random_index(ctx.num_pqs());
