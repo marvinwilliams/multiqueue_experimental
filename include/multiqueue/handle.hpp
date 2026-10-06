@@ -9,9 +9,10 @@ class Handle : public Context::policy_type::mode_type {
     using mode_type = typename Context::policy_type::mode_type;
 
     Context *context_;
-    using value_type = typename Context::value_type;
 
    public:
+    using value_type = typename Context::value_type;
+
     explicit Handle(Context &ctx) noexcept : mode_type{ctx.config(), ctx.shared_data()}, context_{&ctx} {
     }
 
