@@ -36,7 +36,7 @@ class alignas(build_config::l1_cache_line_size) PQGuard {
    public:
     explicit PQGuard() = default;
 
-    explicit PQGuard(priority_queue_type pq) : pq_(std::move(pq)) {
+    explicit PQGuard(priority_queue_type pq) noexcept : pq_(std::move(pq)) {
     }
 
     [[nodiscard]] key_type top_key() const noexcept {
