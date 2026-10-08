@@ -47,28 +47,6 @@ class alignas(build_config::l1_cache_line_size) PQGuard {
         return Sentinel::is_sentinel(top_key());
     }
 
-    bool try_lock() noexcept {
-        // Test first to not invalidate the cache line
-        return (lock_.load(std::memory_order_relaxed) & 1U) == 0U &&
-            (lock_.exchange(1U, std::memory_order_acquire) & 1) == 0U;
-    }
-
-    bool try_lock(bool force, uint32_t mark) noexcept {
-        auto current = lock_.load(std::memory_order_relaxed);
-        while (true) {
-            if ((current & 1U) == 1U) {
-                return false;
-            }
-            if (!force && (current >> 1) != 0U && (current >> 1) != mark + 1) {
-                return false;
-            }
-            if (lock_.compare_exchange_strong(current, ((mark + 1) << 1) | 1, std::memory_order_acquire,
-                                              std::memory_order_relaxed)) {
-                return true;
-            }
-        }
-    }
-
     void popped() {
         auto key = (pq_.empty() ? Sentinel::sentinel() : KeyOfValue::get(pq_.top()));
         top_key_.store(key, std::memory_order_relaxed);
@@ -96,6 +74,19 @@ class alignas(build_config::l1_cache_line_size) PQGuard {
         pushed();
     }
 
+    bool try_lock() noexcept {
+        // Test first to not invalidate the cache line
+        return (lock_.load(std::memory_order_relaxed) & 1U) == 0U &&
+            (lock_.exchange(1U, std::memory_order_acquire) & 1U) == 0U;
+    }
+
+    bool try_lock_if_marked(std::uint32_t mark) noexcept {
+        auto current = lock_.load(std::memory_order_relaxed);
+        std::uint32_t marked = mark << 1;
+        return (current == marked || current == 0U) &&
+            lock_.compare_exchange_strong(current, marked | 1U, std::memory_order_acquire, std::memory_order_relaxed);
+    }
+
     [[nodiscard]] bool try_push(value_type const& v) {
         if (!try_lock()) {
             return false;
@@ -109,8 +100,18 @@ class alignas(build_config::l1_cache_line_size) PQGuard {
         lock_.store(0U, std::memory_order_release);
     }
 
-    void unlock(uint32_t mark) {
-        lock_.store((mark + 1) << 1, std::memory_order_release);
+    void unlock_marked() noexcept {
+        lock_.fetch_and(~1U, std::memory_order_release);
+    }
+
+    void set_mark(std::uint32_t mark) noexcept {
+        auto current = lock_.load(std::memory_order_relaxed);
+        auto old_mark = current >> 1;
+        while (!lock_.compare_exchange_weak(current, (mark << 1) | (current & 1U), std::memory_order_relaxed)) {
+            if ((current >> 1) != old_mark) {
+                return;
+            }
+        }
     }
 
     priority_queue_type& get_pq() noexcept {

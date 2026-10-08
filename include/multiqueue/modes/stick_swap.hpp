@@ -76,8 +76,7 @@ class StickSwap : public StickyModeBase<num_pop_candidates> {
 
    protected:
     explicit StickSwap(config_type const& config, shared_data_type& shared_data) noexcept
-        : base_type{config, shared_data},
-          offset_{this->id() * static_cast<std::size_t>(num_pop_candidates)} {
+        : base_type{config, shared_data}, offset_{this->id() * static_cast<std::size_t>(num_pop_candidates)} {
     }
 
     template <typename Context>
@@ -91,7 +90,7 @@ class StickSwap : public StickyModeBase<num_pop_candidates> {
             auto best_pos = best_position(ctx, keys);
             auto& guard = ctx.pq_guards()[indices[best_pos]];
             if (!guard.try_lock()) {
-                reassign_all(ctx);
+                swap_assignment(ctx.shared_data().permutation, best_pos);
                 continue;
             }
             auto v = guard.pop_locked();
